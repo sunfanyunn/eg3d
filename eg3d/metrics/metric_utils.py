@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Miscellaneous utilities used internally by the quality metrics."""
 
@@ -16,9 +14,12 @@ import hashlib
 import pickle
 import copy
 import uuid
+
+import cv2
 import numpy as np
 import torch
 import dnnlib
+from tqdm import tqdm
 
 #----------------------------------------------------------------------------
 
@@ -56,7 +57,7 @@ def get_feature_detector(url, device=torch.device('cpu'), num_gpus=1, rank=0, ve
 
 #----------------------------------------------------------------------------
 
-def iterate_random_labels(opts, batch_size):
+def iterate_random_labels(opts, batch_size, use_random_label=True, random_elevation_max=30.0):
     if opts.G.c_dim == 0:
         c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
         while True:
@@ -64,7 +65,7 @@ def iterate_random_labels(opts, batch_size):
     else:
         dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
         while True:
-            c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_size)]
+            c = [dataset.get_label(np.random.randint(len(dataset)), use_random_label=use_random_label, random_elevation_max=random_elevation_max) for _i in range(batch_size)]
             c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
             yield c
 
@@ -207,7 +208,11 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
         args = dict(dataset_kwargs=opts.dataset_kwargs, detector_url=detector_url, detector_kwargs=detector_kwargs, stats_kwargs=stats_kwargs)
         md5 = hashlib.md5(repr(sorted(args.items())).encode('utf-8'))
         cache_tag = f'{dataset.name}-{get_feature_detector_name(detector_url)}-{md5.hexdigest()}'
-        cache_file = dnnlib.make_cache_dir_path('gan-metrics', cache_tag + '.pkl')
+        cache_dir = '/home/jungao/shared-def-tet/lab-code/human_face_3d/stylegan3_updategit/stylegan3/cache/gan-metrics-eg3d'
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_file = os.path.join(cache_dir, cache_tag + '.pkl')
+
+        # cache_file = dnnlib.make_cache_dir_path('gan-metrics', cache_tag + '.pkl')
 
         # Check if the file exists (all processes must agree).
         flag = os.path.isfile(cache_file) if opts.rank == 0 else False
@@ -230,7 +235,7 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
 
     # Main loop.
     item_subset = [(i * opts.num_gpus + opts.rank) % num_items for i in range((num_items - 1) // opts.num_gpus + 1)]
-    for images, _labels in torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs):
+    for images, _labels in tqdm(torch.utils.data.DataLoader(dataset=dataset, sampler=item_subset, batch_size=batch_size, **data_loader_kwargs)):
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
         features = detector(images.to(opts.device), **detector_kwargs)
@@ -249,27 +254,48 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
 
 def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel_lo=0, rel_hi=1, batch_size=64, batch_gen=None, **stats_kwargs):
     if batch_gen is None:
-        batch_gen = min(batch_size, 4)
+        batch_gen = min(batch_size, 1)###################
     assert batch_size % batch_gen == 0
-
+    ####
     # Setup generator and labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
-    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen)
+    random_elevation_max = 30.0
+    random_elevation_max = 45.0 ############ angle for animals
+    use_random_label = True ##############
+    c_iter = iterate_random_labels(opts=opts, batch_size=batch_gen, random_elevation_max=random_elevation_max,
+                                   use_random_label=use_random_label)
 
     # Initialize.
     stats = FeatureStats(**stats_kwargs)
     assert stats.max_items is not None
     progress = opts.progress.sub(tag='generator features', num_items=stats.max_items, rel_lo=rel_lo, rel_hi=rel_hi)
-    detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
+    progress.verbose = True
 
+    detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
+    print('==> compute feature for generator')
     # Main loop.
+    # import ipdb
+    # ipdb.set_trace()
+    # import ipdb
+    ################################################################################
+    # ipdb.set_trace()
+    # img = G(z=z, c=next(c_iter), truncation_psi=0.7)['image']
+    # import ipdb
+    # ipdb.set_trace()
+    ########################################################################################
+    truncation_psi = 1.0 # It's better not do truncation########
     while not stats.is_full():
         images = []
         for _i in range(batch_size // batch_gen):
             z = torch.randn([batch_gen, G.z_dim], device=opts.device)
-            img = G(z=z, c=next(c_iter), **opts.G_kwargs)['image']
+            img = G(z=z, c=next(c_iter), noise_mode='const', truncation_psi=truncation_psi, **opts.G_kwargs)['image']
             img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
             images.append(img)
+            # import ipdb
+            # ipdb.set_trace()
+            # cv2.imwrite('debug/debug_infer_random_camera_new_3.png', np.ascontiguousarray(img[3].permute(1, 2, 0).data.cpu().numpy()[:, :, ::-1]))
+            # cv2.imwrite('debug/debug_infer_random_camera_new_1.png',np.ascontiguousarray(img[1].permute(1, 2, 0).data.cpu().numpy()[:, :, ::-1]))
+            #########################
         images = torch.cat(images)
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
@@ -278,4 +304,3 @@ def compute_feature_stats_for_generator(opts, detector_url, detector_kwargs, rel
         progress.update(stats.num_items)
     return stats
 
-#----------------------------------------------------------------------------

@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Tool for creating ZIP/PNG based datasets."""
 
@@ -354,7 +352,7 @@ def convert_dataset(
     offer better training performance on network file systems.
 
     Images within the dataset archive will be stored as uncompressed PNG.
-    Uncompressed PNGs can be efficiently decoded in the training loop.
+    Uncompresed PNGs can be efficiently decoded in the training loop.
 
     Class labels are stored in a file called 'dataset.json' that is stored at the
     dataset root folder.  This file has the following structure:
@@ -364,7 +362,7 @@ def convert_dataset(
         "labels": [
             ["00000/img00000000.png",6],
             ["00000/img00000001.png",9],
-            ... repeated for every image in the dataset
+            ... repeated for every image in the datase
             ["00049/img00049999.png",1]
         ]
     }

@@ -1,0 +1,8 @@
+set bgColor white
+volume style surface level 1
+volume step 1
+lighting preset full
+lighting direction 0,-0.5,-1
+view matrix camera 0,0,1,950,0,1,0,270,-1,0,0,260
+save $file.png
+save $file.obj

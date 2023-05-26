@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import click
 import os
@@ -26,8 +24,8 @@ from viz import stylemix_widget
 from viz import trunc_noise_widget
 from viz import performance_widget
 from viz import capture_widget
-from viz import backbone_cache_widget
 from viz import layer_widget
+from viz import equivariance_widget
 from viz import pose_widget
 from viz import zoom_widget
 from viz import conditioning_pose_widget
@@ -61,8 +59,8 @@ class Visualizer(imgui_window.ImguiWindow):
         self.trunc_noise_widget = trunc_noise_widget.TruncationNoiseWidget(self)
         self.perf_widget        = performance_widget.PerformanceWidget(self)
         self.capture_widget     = capture_widget.CaptureWidget(self)
-        self.backbone_cache_widget     = backbone_cache_widget.BackboneCacheWidget(self)
         self.layer_widget       = layer_widget.LayerWidget(self)
+        self.eq_widget          = equivariance_widget.EquivarianceWidget(self)
         self.pose_widget        = pose_widget.PoseWidget(self)
         self.zoom_widget        = zoom_widget.ZoomWidget(self)
         self.conditioning_pose_widget        = conditioning_pose_widget.ConditioningPoseWidget(self)
@@ -147,8 +145,10 @@ class Visualizer(imgui_window.ImguiWindow):
         self.perf_widget(expanded)
         self.capture_widget(expanded)
         expanded, _visible = imgui_utils.collapsing_header('Layers & channels', default=True)
-        self.backbone_cache_widget(expanded)
         self.layer_widget(expanded)
+        with imgui_utils.grayed_out(not self.result.get('has_input_transform', False)):
+            expanded, _visible = imgui_utils.collapsing_header('Equivariance', default=True)
+            self.eq_widget(expanded)
 
         # Render.
         if self.is_skipping_frames():
@@ -299,17 +299,45 @@ def main(
         viz.pickle_widget.search_dirs = [browse_dir]
 
     # List pickles.
-    pretrained = [
-        'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/ffhq512-128.pkl',
-        'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/afhqcats512-128.pkl',
-        'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/ffhqrebalanced512-64.pkl',
-        'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/ffhqrebalanced512-128.pkl',
-        'https://api.ngc.nvidia.com/v2/models/nvidia/research/eg3d/versions/1/files/shapenetcars128-64.pkl',
-    ]
+    pkls = ['/home/ericchan/Downloads/network-snapshot-002200.pkl']
+    if len(pkls) > 0:
+        for pkl in pkls:
+            viz.add_recent_pickle(pkl)
+        viz.load_pickle(pkls[0])
+    else:
+        pretrained = [
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-afhqv2-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-ffhq-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-ffhqu-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-ffhqu-256x256.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-metfaces-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-r-metfacesu-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-afhqv2-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-ffhq-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-ffhqu-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-ffhqu-256x256.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-metfaces-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/stylegan3-t-metfacesu-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-afhqcat-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-afhqdog-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-afhqv2-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-afhqwild-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-brecahad-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-celebahq-256x256.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-cifar10-32x32.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-ffhq-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-ffhq-256x256.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-ffhq-512x512.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-ffhqu-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-ffhqu-256x256.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-lsundog-256x256.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-metfaces-1024x1024.pkl',
+            'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan2/versions/1/files/stylegan2-metfacesu-1024x1024.pkl'
+        ]
 
-    # Populate recent pickles list with pretrained model URLs.
-    for url in pretrained:
-        viz.add_recent_pickle(url)
+        # Populate recent pickles list with pretrained model URLs.
+        for url in pretrained:
+            viz.add_recent_pickle(url)
 
     # Run.
     while not viz.should_close():

@@ -1,26 +1,7 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
-#
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
-
 
 """
-Utils for extracting 3D shapes using marching cubes. Based on code from DeepSDF (Park et al.)
-
-Takes as input an .mrc file and extracts a mesh.
-
-Ex.
-    python shape_utils.py my_shape.mrc
-Ex.
-    python shape_utils.py myshapes_directory --level=12
+Dataloaders for 3D experiments. Based on code from DeepSDF (Park et al.)
 """
-
-
 import time
 import plyfile
 import glob
@@ -36,6 +17,31 @@ import argparse
 import mrcfile
 from tqdm import tqdm
         
+def create_samples(N=256, max_batch = 32768, offset=None, scale=None):
+    # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
+    voxel_origin = [-1, -1, -1]
+    voxel_size = 2.0 / (N - 1)
+
+    overall_index = torch.arange(0, N ** 3, 1, out=torch.LongTensor())
+    samples = torch.zeros(N ** 3, 4)
+
+    # transform first 3 columns
+    # to be the x, y, z index
+    samples[:, 2] = overall_index % N
+    samples[:, 1] = (overall_index.float() / N) % N
+    samples[:, 0] = ((overall_index.float() / N) / N) % N
+
+    # transform first 3 columns
+    # to be the x, y, z coordinate
+    samples[:, 0] = (samples[:, 0] * voxel_size) + voxel_origin[2]
+    samples[:, 1] = (samples[:, 1] * voxel_size) + voxel_origin[1]
+    samples[:, 2] = (samples[:, 2] * voxel_size) + voxel_origin[0]
+
+    num_samples = N ** 3
+
+    samples.requires_grad = False
+                   
+    return samples
 
 def convert_sdf_samples_to_ply(
     numpy_3d_sdf_tensor,
@@ -108,7 +114,6 @@ if __name__ == '__main__':
     start_time = time.time()
     parser = argparse.ArgumentParser()
     parser.add_argument('input_mrc_path')
-    parser.add_argument('--level', type=float, default=10, help="The isosurface level for marching cubes")
     args = parser.parse_args()
 
     if os.path.isfile(args.input_mrc_path) and args.input_mrc_path.split('.')[-1] == 'ply':
@@ -121,4 +126,4 @@ if __name__ == '__main__':
 
         for mrc_path in tqdm(glob.glob(os.path.join(args.input_mrc_path, '*.mrc'))):
             output_obj_path = mrc_path.split('.mrc')[0] + '.ply'
-            convert_mrc(mrc_path, output_obj_path, isosurface_level=args.level)
+            convert_mrc(mrc_path, output_obj_path, isosurface_level=1)

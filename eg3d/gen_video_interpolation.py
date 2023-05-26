@@ -1,15 +1,14 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Generate lerp videos using pretrained network pickle."""
 
+import copy
 import os
 import re
 from typing import List, Optional, Tuple, Union
@@ -88,11 +87,11 @@ def gen_interp_video(G, mp4: str, seeds, shuffle_seed=None, w_frames=60*4, kind=
         rng = np.random.RandomState(seed=shuffle_seed)
         rng.shuffle(all_seeds)
 
-    camera_lookat_point = torch.tensor(G.rendering_kwargs['avg_camera_pivot'], device=device)
+    camera_lookat_point = torch.tensor([0, 0, 0.2], device=device) if cfg == 'FFHQ' else torch.tensor([0, 0, 0], device=device)
+
     zs = torch.from_numpy(np.stack([np.random.RandomState(seed).randn(G.z_dim) for seed in all_seeds])).to(device)
-    cam2world_pose = LookAtPoseSampler.sample(3.14/2, 3.14/2, camera_lookat_point, radius=G.rendering_kwargs['avg_camera_radius'], device=device)
-    focal_length = 4.2647 if cfg != 'Shapenet' else 1.7074 # shapenet has higher FOV
-    intrinsics = torch.tensor([[focal_length, 0, 0.5], [0, focal_length, 0.5], [0, 0, 1]], device=device)
+    cam2world_pose = LookAtPoseSampler.sample(3.14/2, 3.14/2, camera_lookat_point, radius=2.7, device=device)
+    intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
     c = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
     c = c.repeat(len(zs), 1)
     ws = G.mapping(z=zs, c=c, truncation_psi=psi, truncation_cutoff=truncation_cutoff)
@@ -127,21 +126,21 @@ def gen_interp_video(G, mp4: str, seeds, shuffle_seed=None, w_frames=60*4, kind=
                 yaw_range = 0.35
                 cam2world_pose = LookAtPoseSampler.sample(3.14/2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (num_keyframes * w_frames)),
                                                         3.14/2 -0.05 + pitch_range * np.cos(2 * 3.14 * frame_idx / (num_keyframes * w_frames)),
-                                                        camera_lookat_point, radius=G.rendering_kwargs['avg_camera_radius'], device=device)
+                                                        camera_lookat_point, radius=2.7, device=device)
                 all_poses.append(cam2world_pose.squeeze().cpu().numpy())
-                focal_length = 4.2647 if cfg != 'Shapenet' else 1.7074 # shapenet has higher FOV
-                intrinsics = torch.tensor([[focal_length, 0, 0.5], [0, focal_length, 0.5], [0, 0, 1]], device=device)
+                intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
+                # intrinsics = torch.tensor([[2.92, 0, 0.5], [0, 2.92, 0.5], [0, 0, 1]], device=device)
                 c = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
 
                 interp = grid[yi][xi]
                 w = torch.from_numpy(interp(frame_idx / w_frames)).to(device)
-
+                
                 entangle = 'camera'
                 if entangle == 'conditioning':
                     c_forward = torch.cat([LookAtPoseSampler.sample(3.14/2,
                                                                     3.14/2,
                                                                     camera_lookat_point,
-                                                                    radius=G.rendering_kwargs['avg_camera_radius'], device=device).reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
+                                                                    radius=2.7, device=device).reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
                     w_c = G.mapping(z=zs[0:1], c=c[0:1], truncation_psi=psi, truncation_cutoff=truncation_cutoff)
                     img = G.synthesis(ws=w_c, c=c_forward, noise_mode='const')[image_mode][0]
                 elif entangle == 'camera':
@@ -159,7 +158,7 @@ def gen_interp_video(G, mp4: str, seeds, shuffle_seed=None, w_frames=60*4, kind=
                 if gen_shapes:
                     # generate shapes
                     print('Generating shape for frame %d / %d ...' % (frame_idx, num_keyframes * w_frames))
-
+                    
                     samples, voxel_origin, voxel_size = create_samples(N=voxel_resolution, voxel_origin=[0, 0, 0], cube_length=G.rendering_kwargs['box_warp'])
                     samples = samples.to(device)
                     sigmas = torch.zeros((samples.shape[0], samples.shape[1], 1), device=device)
@@ -178,7 +177,7 @@ def gen_interp_video(G, mp4: str, seeds, shuffle_seed=None, w_frames=60*4, kind=
 
                     sigmas = sigmas.reshape((voxel_resolution, voxel_resolution, voxel_resolution)).cpu().numpy()
                     sigmas = np.flip(sigmas, 0)
-
+                    
                     pad = int(30 * voxel_resolution / 256)
                     pad_top = int(38 * voxel_resolution / 256)
                     sigmas[:pad] = 0
@@ -191,7 +190,7 @@ def gen_interp_video(G, mp4: str, seeds, shuffle_seed=None, w_frames=60*4, kind=
                     output_ply = True
                     if output_ply:
                         from shape_utils import convert_sdf_samples_to_ply
-                        convert_sdf_samples_to_ply(np.transpose(sigmas, (2, 1, 0)), [0, 0, 0], 1, os.path.join(outdir, f'{frame_idx:04d}_shape.ply'), level=10)
+                        convert_sdf_samples_to_ply(np.transpose(sigmas, (2, 1, 0)), [0, 0, 0], 1, outdir + f'{frame_idx:04d}_shape.ply', level=1)
                     else: # output mrc
                         with mrcfile.new_mmap(outdir + f'{frame_idx:04d}_shape.mrc', overwrite=True, shape=sigmas.shape, mrc_mode=2) as mrc:
                             mrc.data[:] = sigmas
@@ -246,14 +245,14 @@ def parse_tuple(s: Union[str, Tuple[int,int]]) -> Tuple[int, int]:
 @click.option('--num-keyframes', type=int, help='Number of seeds to interpolate through.  If not specified, determine based on the length of the seeds array given by --seeds.', default=None)
 @click.option('--w-frames', type=int, help='Number of frames to interpolate between latents', default=120)
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
-@click.option('--trunc-cutoff', 'truncation_cutoff', type=int, help='Truncation cutoff', default=14, show_default=True)
+@click.option('--trunc_cutoff', 'truncation_cutoff', type=int, help='Truncation cutoff', default=14, show_default=True)
 @click.option('--outdir', help='Output directory', type=str, required=True, metavar='DIR')
 @click.option('--reload_modules', help='Overload persistent modules?', type=bool, required=False, metavar='BOOL', default=False, show_default=True)
-@click.option('--cfg', help='Config', type=click.Choice(['FFHQ', 'AFHQ', 'Shapenet']), required=False, metavar='STR', default='FFHQ', show_default=True)
+@click.option('--cfg', help='Config', type=click.Choice(['FFHQ', 'Cats']), required=False, metavar='STR', default='FFHQ', show_default=True)
 @click.option('--image_mode', help='Image mode', type=click.Choice(['image', 'image_depth', 'image_raw']), required=False, metavar='STR', default='image', show_default=True)
 @click.option('--sample_mult', 'sampling_multiplier', type=float, help='Multiplier for depth sampling in volume rendering', default=2, show_default=True)
 @click.option('--nrr', type=int, help='Neural rendering resolution override', default=None, show_default=True)
-@click.option('--shapes', type=bool, help='Gen shapes for shape interpolation', default=False, show_default=True)
+@click.option('--gen_shapes', type=bool, help='Gen shapes for shape interpolation', default=False, show_default=True)
 @click.option('--interpolate', type=bool, help='Interpolate between seeds', default=True, show_default=True)
 
 def generate_images(
@@ -271,7 +270,7 @@ def generate_images(
     image_mode: str,
     sampling_multiplier: float,
     nrr: Optional[int],
-    shapes: bool,
+    gen_shapes: bool,
     interpolate: bool,
 ):
     """Render a latent vector interpolation video.
@@ -296,14 +295,17 @@ def generate_images(
     output video length will be '# seeds/(w*h)*w_frames' frames.
     """
 
-    if not os.path.exists(outdir):
-        os.makedirs(outdir, exist_ok=True)
-
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
 
+    if reload_modules:
+        print("Reloading Modules!")
+        G_new = SRPosedGenerator(*G.init_args, **G.init_kwargs).eval().requires_grad_(False).to(device)
+        misc.copy_params_and_buffers(G, G_new, require_all=True)
+        G_new.neural_rendering_resolution = G.neural_rendering_resolution 
+        G = G_new
 
     G.rendering_kwargs['depth_resolution'] = int(G.rendering_kwargs['depth_resolution'] * sampling_multiplier)
     G.rendering_kwargs['depth_resolution_importance'] = int(G.rendering_kwargs['depth_resolution_importance'] * sampling_multiplier)
@@ -316,7 +318,7 @@ def generate_images(
 
     if interpolate:
         output = os.path.join(outdir, 'interpolation.mp4')
-        gen_interp_video(G=G, mp4=output, bitrate='10M', grid_dims=grid, num_keyframes=num_keyframes, w_frames=w_frames, seeds=seeds, shuffle_seed=shuffle_seed, psi=truncation_psi, truncation_cutoff=truncation_cutoff, cfg=cfg, image_mode=image_mode, gen_shapes=shapes)
+        gen_interp_video(G=G, mp4=output, bitrate='10M', grid_dims=grid, num_keyframes=num_keyframes, w_frames=w_frames, seeds=seeds, shuffle_seed=shuffle_seed, psi=truncation_psi, truncation_cutoff=truncation_cutoff, cfg=cfg, image_mode=image_mode, gen_shapes=gen_shapes)
     else:
         for seed in seeds:
             output = os.path.join(outdir, f'{seed}.mp4')

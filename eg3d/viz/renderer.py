@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import sys
 import copy
@@ -190,21 +188,13 @@ class Renderer:
 
     def _tweak_network(self, net):
         # Print diagnostics.
-
-        RELOAD_MODULES = False
-        if RELOAD_MODULES:
-            from training.triplane import TriPlaneGenerator
-            from torch_utils import misc
-            print("Reloading Modules!")
-            net_new = TriPlaneGenerator(*net.init_args, **net.init_kwargs).eval().requires_grad_(False).to(self._device)
-            misc.copy_params_and_buffers(net, net_new, require_all=True)
-            net_new.neural_rendering_resolution = net.neural_rendering_resolution
-            net_new.rendering_kwargs = net.rendering_kwargs
-            net = net_new
-            # net.rendering_kwargs['ray_start'] = 'auto'
-            # net.rendering_kwargs['ray_end'] = 'auto'
-            # net.rendering_kwargs['avg_camera_pivot'] = [0, 0, 0]
-
+        #for name, value in misc.named_params_and_buffers(net):
+        #    if name.endswith('.magnitude_ema'):
+        #        value = value.rsqrt().numpy()
+        #        print(f'{name:<50s}{np.min(value):<16g}{np.max(value):g}')
+        #    if name.endswith('.weight') and value.ndim == 4:
+        #        value = value.square().mean([1,2,3]).sqrt().numpy()
+        #        print(f'{name:<50s}{np.min(value):<16g}{np.max(value):g}')
         return net
 
     def _get_pinned_buf(self, ref):
@@ -260,16 +250,13 @@ class Renderer:
 
         yaw             = 0,
         pitch           = 0,
-        lookat_point    = (0, 0, 0.2),
         conditioning_yaw    = 0,
         conditioning_pitch  = 0,
         focal_length    = 4.2647,
         render_type     = 'image',
 
-        do_backbone_caching = False,
-
         depth_mult            = 1,
-        depth_importance_mult = 1,
+        depth_importance_mult = 1
     ):
         # Dig up network details.
         G = self.get_network(pkl, 'G_ema').eval().requires_grad_(False).to('cuda')
@@ -304,16 +291,12 @@ class Renderer:
         for idx, seed in enumerate(all_seeds):
             rnd = np.random.RandomState(seed)
             all_zs[idx] = rnd.randn(G.z_dim)
-        if lookat_point is None:
-            camera_pivot = torch.tensor(G.rendering_kwargs.get('avg_camera_pivot', (0, 0, 0)))
-        else:
-            # override lookat point provided
-            camera_pivot = torch.tensor(lookat_point)
-        camera_radius = G.rendering_kwargs.get('avg_camera_radius', 2.7)
-        forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2 + conditioning_yaw, 3.14/2 + conditioning_pitch, camera_pivot, radius=camera_radius)
-        intrinsics = torch.tensor([[focal_length, 0, 0.5], [0, focal_length, 0.5], [0, 0, 1]])
-        conditioning_params = torch.cat([forward_cam2world_pose.reshape(16), intrinsics.reshape(9)], 0)
-        all_cs[idx, :] = conditioning_params.numpy()
+            # if G.c_dim > 0:
+                # all_cs[idx, rnd.randint(G.c_dim)] = 1
+        forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2 + conditioning_yaw, 3.14/2 + conditioning_pitch, torch.tensor([0, 0, 0.2]), radius=G.rendering_kwargs.get('avg_camera_radius', 2.7))
+        intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]])
+        forward_label = torch.cat([forward_cam2world_pose.reshape(16), intrinsics.reshape(9)], 0)
+        all_cs[idx, :] = forward_label.numpy()
 
 
         # Run mapping network.
@@ -332,16 +315,17 @@ class Renderer:
         w += w_avg
 
         # Run synthesis network.
-        synthesis_kwargs = dnnlib.EasyDict(noise_mode=noise_mode, force_fp32=force_fp32, cache_backbone=do_backbone_caching)
+        synthesis_kwargs = dnnlib.EasyDict(noise_mode=noise_mode, force_fp32=force_fp32, cache_backbone=True)
         torch.manual_seed(random_seed)
 
         # Set camera params
-        pose = LookAtPoseSampler.sample(3.14/2 + yaw, 3.14/2 + pitch, camera_pivot, radius=camera_radius)
+        pose = LookAtPoseSampler.sample(3.14/2 + yaw, 3.14/2 + pitch, torch.tensor([0, 0, 0.2]), radius=G.rendering_kwargs.get('avg_camera_radius', 2.7))
         intrinsics = torch.tensor([[focal_length, 0, 0.5], [0, focal_length, 0.5], [0, 0, 1]])
+        # intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]])
         c = torch.cat([pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1).to(w.device)
 
         # Backbone caching
-        if do_backbone_caching and self._last_model_input is not None and torch.all(self._last_model_input == w):
+        if self._last_model_input is not None and torch.all(self._last_model_input == w):
             synthesis_kwargs.use_cached_backbone = True
         else:
             synthesis_kwargs.use_cached_backbone = False
@@ -353,7 +337,7 @@ class Renderer:
         if cache_key not in self._net_layers:
             if layer_name is not None:
                 torch.manual_seed(random_seed)
-                _out, layers = self.run_synthesis_net(G, w, c, **synthesis_kwargs)
+                _out, layers = self.run_synthesis_net(G.synthesis, w, **synthesis_kwargs)
             self._net_layers[cache_key] = layers
         res.layers = self._net_layers[cache_key]
 
@@ -438,6 +422,7 @@ class Renderer:
 
         hooks = [module.register_forward_hook(module_hook) for module in net.modules()]
         try:
+            # out = net(*args, **kwargs)
             out = net.synthesis(*args, **kwargs)
         except CaptureSuccess as e:
             out = e.out

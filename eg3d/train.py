@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Train a GAN using the techniques described in the paper
 "Efficient Geometry-aware 3D Generative Adversarial Networks."
@@ -63,8 +61,14 @@ def launch_training(c, desc, outdir, dry_run):
     prev_run_ids = [re.match(r'^\d+', x) for x in prev_run_dirs]
     prev_run_ids = [int(x.group()) for x in prev_run_ids if x is not None]
     cur_run_id = max(prev_run_ids, default=-1) + 1
-    c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
-    assert not os.path.exists(c.run_dir)
+    if c.inference:
+        if c.inference_show_geo_fid:
+            c.run_dir = os.path.join(outdir, 'inference_geo_only_render')
+        else:
+            c.run_dir = os.path.join(outdir, 'inference')
+    else:
+        c.run_dir = os.path.join(outdir, f'{cur_run_id:05d}-{desc}')
+        assert not os.path.exists(c.run_dir)
 
     # Print options.
     print()
@@ -89,7 +93,7 @@ def launch_training(c, desc, outdir, dry_run):
 
     # Create output directory.
     print('Creating output directory...')
-    os.makedirs(c.run_dir)
+    os.makedirs(c.run_dir, exist_ok=True)
     with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
         json.dump(c, f, indent=2)
 
@@ -104,12 +108,24 @@ def launch_training(c, desc, outdir, dry_run):
 
 #----------------------------------------------------------------------------
 
-def init_dataset_kwargs(data):
+def init_dataset_kwargs(data, data_camera_mode, use_white_back=False, inference=False):
     try:
-        dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
+        if inference:
+            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDatasetMe', path=data, use_labels=True,
+                                         max_size=None, xflip=False, data_camera_mode=data_camera_mode, split='test',
+                                         resolution=512, use_white_back=use_white_back)
+        else:
+            split = 'train'##########################
+            dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDatasetMe', path=data,
+                                             use_labels=True,
+                                             max_size=None, xflip=False, data_camera_mode=data_camera_mode,
+                                             split=split,
+                                             resolution=512, use_white_back=use_white_back)
+
         dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # Subclass of training.dataset.Dataset.
+
         dataset_kwargs.resolution = dataset_obj.resolution # Be explicit about resolution.
-        dataset_kwargs.use_labels = dataset_obj.has_labels # Be explicit about labels.
+        dataset_kwargs.use_labels = dataset_obj.has_labels ############### Be explicit about labels.
         dataset_kwargs.max_size = len(dataset_obj) # Be explicit about dataset size.
         return dataset_kwargs, dataset_obj.name
     except IOError as err:
@@ -129,8 +145,14 @@ def parse_comma_separated_list(s):
 @click.command()
 
 # Required.
+@click.option('--inference_gen_geo',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
+@click.option('--inference_show_geo_fid',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
+@click.option('--inference',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
+@click.option('--use_white_back',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
+@click.option('--camera_look_at_negative_z',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
+@click.option('--data_camera_mode',       help='Resume from given network pickle',  type=str, default='carla', show_default=True)
 @click.option('--outdir',       help='Where to save the results', metavar='DIR',                required=True)
-@click.option('--cfg',          help='Base configuration',                                      type=str, required=True)
+@click.option('--cfg',          help='Base configuration',                                      type=click.Choice(['ffhq', 'afhq', 'shapenet', 'mads']), required=True)
 @click.option('--data',         help='Training data', metavar='[ZIP|DIR]',                      type=str, required=True)
 @click.option('--gpus',         help='Number of GPUs to use', metavar='INT',                    type=click.IntRange(min=1), required=True)
 @click.option('--batch',        help='Total batch size', metavar='INT',                         type=click.IntRange(min=1), required=True)
@@ -163,8 +185,8 @@ def parse_comma_separated_list(s):
 @click.option('--seed',         help='Random seed', metavar='INT',                              type=click.IntRange(min=0), default=0, show_default=True)
 # @click.option('--fp32',         help='Disable mixed-precision', metavar='BOOL',                 type=bool, default=False, show_default=True)
 @click.option('--nobench',      help='Disable cuDNN benchmarking', metavar='BOOL',              type=bool, default=False, show_default=True)
-@click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=1), default=3, show_default=True)
-@click.option('-n','--dry-run', help='Print training options and exit',                         is_flag=True)
+@click.option('--workers',      help='DataLoader worker processes', metavar='INT',              type=click.IntRange(min=0), default=3, show_default=True)
+@click.option('-n','--dry-run', help='Print training options and exit',                         is_flag=True)####
 
 # @click.option('--sr_module',    help='Superresolution module', metavar='STR',  type=str, required=True)
 @click.option('--neural_rendering_resolution_initial', help='Resolution to render at', metavar='INT',  type=click.IntRange(min=1), default=64, required=False)
@@ -175,9 +197,8 @@ def parse_comma_separated_list(s):
 @click.option('--gen_pose_cond', help='If true, enable generator pose conditioning.', metavar='BOOL',  type=bool, required=False, default=False)
 @click.option('--c-scale', help='Scale factor for generator pose conditioning.', metavar='FLOAT',  type=click.FloatRange(min=0), required=False, default=1)
 @click.option('--c-noise', help='Add noise for generator pose conditioning.', metavar='FLOAT',  type=click.FloatRange(min=0), required=False, default=0)
-@click.option('--gpc_reg_prob', help='Strength of swapping regularization. None means no generator pose conditioning, i.e. condition with zeros.', metavar='FLOAT',  type=click.FloatRange(min=0), required=False, default=0.5)
-@click.option('--gpc_reg_fade_kimg', help='Length of swapping prob fade', metavar='INT',  type=click.IntRange(min=0), required=False, default=1000)
-@click.option('--disc_c_noise', help='Strength of discriminator pose conditioning regularization, in standard deviations.', metavar='FLOAT',  type=click.FloatRange(min=0), required=False, default=0)
+@click.option('--swapping_prob_final', help='Strength of swapping regularization. None means no generator pose conditioning, i.e. condition with zeros.', metavar='FLOAT',  type=click.FloatRange(min=0), required=False, default=0.5)
+@click.option('--swapping_prob_fade_kimg', help='Length of swapping prob fade', metavar='INT',  type=click.IntRange(min=0), required=False, default=1000)
 @click.option('--sr_noise_mode', help='Type of noise for superresolution', metavar='STR',  type=click.Choice(['random', 'none']), required=False, default='none')
 @click.option('--resume_blur', help='Enable to blur even on resume', metavar='BOOL',  type=bool, required=False, default=False)
 @click.option('--sr_num_fp16_res',    help='Number of fp16 layers in superresolution', metavar='INT', type=click.IntRange(min=0), default=4, required=False, show_default=True)
@@ -190,7 +211,7 @@ def parse_comma_separated_list(s):
 @click.option('--density_reg',    help='Density regularization strength.', metavar='FLOAT', type=click.FloatRange(min=0), default=0.25, required=False, show_default=True)
 @click.option('--density_reg_every',    help='lazy density reg', metavar='int', type=click.FloatRange(min=1), default=4, required=False, show_default=True)
 @click.option('--density_reg_p_dist',    help='density regularization strength.', metavar='FLOAT', type=click.FloatRange(min=0), default=0.004, required=False, show_default=True)
-@click.option('--reg_type', help='Type of regularization', metavar='STR',  type=click.Choice(['l1', 'l1-alt', 'monotonic-detach', 'monotonic-fixed', 'total-variation']), required=False, default='l1')
+@click.option('--reg_type', help='Type of regularization', metavar='STR',  type=click.Choice(['l1', 'mse', 'tv-l1', 'monotonic', 'l1-more-samples', 'monotonic-2', 'monotonic-hybrid', 'monotonic-l1', 'monotonic-hybrid-l2', 'monotonic-hybrid-2', 'monotonic-detach', 'monotonic-detach-fade', 'monotonic-fixed', 'monotonic-fade']), required=False, default='l1')
 @click.option('--decoder_lr_mul',    help='decoder learning rate multiplier.', metavar='FLOAT', type=click.FloatRange(min=0), default=1, required=False, show_default=True)
 
 def main(**kwargs):
@@ -227,18 +248,24 @@ def main(**kwargs):
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, prefetch_factor=2)
 
     # Training set.
-    c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data)
+    c.training_set_kwargs, dataset_name = init_dataset_kwargs(data=opts.data, data_camera_mode=opts.data_camera_mode,
+                                                              use_white_back=opts.use_white_back, inference=opts.inference)
     if opts.cond and not c.training_set_kwargs.use_labels:
         raise click.ClickException('--cond=True requires labels specified in dataset.json')
     c.training_set_kwargs.use_labels = opts.cond
     c.training_set_kwargs.xflip = opts.mirror
 
     # Hyperparameters & settings.
+    c.inference_show_geo_fid = opts.inference_show_geo_fid
+    c.inference_gen_geo = opts.inference_gen_geo
+    c.inference = opts.inference
     c.num_gpus = opts.gpus
     c.batch_size = opts.batch
     c.batch_gpu = opts.batch_gpu or opts.batch // opts.gpus
+    c.G_kwargs.camera_look_at_negative_z = opts.camera_look_at_negative_z
     c.G_kwargs.channel_base = c.D_kwargs.channel_base = opts.cbase
     c.G_kwargs.channel_max = c.D_kwargs.channel_max = opts.cmax
+    # c.G_kwargs.mapping_kwargs.num_layers = (8 if opts.cfg == 'stylegan2' else 2) if opts.map_depth is None else opts.map_depth
     c.G_kwargs.mapping_kwargs.num_layers = opts.map_depth
     c.D_kwargs.block_kwargs.freeze_layers = opts.freezed
     c.D_kwargs.epilogue_kwargs.mbstd_group_size = opts.mbstd_group
@@ -264,42 +291,22 @@ def main(**kwargs):
 
     # Base configuration.
     c.ema_kimg = c.batch_size * 10 / 32
-    c.G_kwargs.class_name = 'training.triplane.TriPlaneGenerator'
+    c.G_kwargs.class_name = 'training.triplane.TriPlaneGenerator'#opts.gen_module#'training.triplane_double_layer.TriPlaneGenerator'
     c.D_kwargs.class_name = 'training.dual_discriminator.DualDiscriminator'
     c.G_kwargs.fused_modconv_default = 'inference_only' # Speed up training by using regular convolutions instead of grouped convolutions.
-    c.loss_kwargs.filter_mode = 'antialiased' # Filter mode for raw images ['antialiased', 'none', float [0-1]]
-    c.D_kwargs.disc_c_noise = opts.disc_c_noise # Regularization for discriminator pose conditioning
 
     if c.training_set_kwargs.resolution == 512:
-        sr_module = 'training.superresolution.SuperresolutionHybrid8XDC'
+        sr_module = 'training.superresolution.SuperresolutionHybrid8X'
     elif c.training_set_kwargs.resolution == 256:
         sr_module = 'training.superresolution.SuperresolutionHybrid4X'
     elif c.training_set_kwargs.resolution == 128:
         sr_module = 'training.superresolution.SuperresolutionHybrid2X'
-    else:
-        assert False, f"Unsupported resolution {c.training_set_kwargs.resolution}; make a new superresolution module"
     
     if opts.sr_module != None:
         sr_module = opts.sr_module
     
-    rendering_options = {
-        'image_resolution': c.training_set_kwargs.resolution,
-        'disparity_space_sampling': False,
-        'clamp_mode': 'softplus',
-        'superresolution_module': sr_module,
-        'c_gen_conditioning_zero': not opts.gen_pose_cond, # if true, fill generator pose conditioning label with dummy zero vector
-        'gpc_reg_prob': opts.gpc_reg_prob if opts.gen_pose_cond else None,
-        'c_scale': opts.c_scale, # mutliplier for generator pose conditioning label
-        'superresolution_noise_mode': opts.sr_noise_mode, # [random or none], whether to inject pixel noise into super-resolution layers
-        'density_reg': opts.density_reg, # strength of density regularization
-        'density_reg_p_dist': opts.density_reg_p_dist, # distance at which to sample perturbed points for density regularization
-        'reg_type': opts.reg_type, # for experimenting with variations on density regularization
-        'decoder_lr_mul': opts.decoder_lr_mul, # learning rate multiplier for decoder
-        'sr_antialias': True,
-    }
-
     if opts.cfg == 'ffhq':
-        rendering_options.update({
+        rendering_options = {
             'depth_resolution': 48, # number of uniform samples to take per ray.
             'depth_resolution_importance': 48, # number of importance samples to take per ray.
             'ray_start': 2.25, # near point along each ray to start taking samples.
@@ -307,42 +314,76 @@ def main(**kwargs):
             'box_warp': 1, # the side-length of the bounding box spanned by the tri-planes; box_warp=1 means [-0.5, -0.5, -0.5] -> [0.5, 0.5, 0.5].
             'avg_camera_radius': 2.7, # used only in the visualizer to specify camera orbit radius.
             'avg_camera_pivot': [0, 0, 0.2], # used only in the visualizer to control center of camera rotation.
-        })
+        }
     elif opts.cfg == 'afhq':
-        rendering_options.update({
+        rendering_options = {
             'depth_resolution': 48,
             'depth_resolution_importance': 48,
             'ray_start': 2.25,
             'ray_end': 3.3,
             'box_warp': 1,
             'avg_camera_radius': 2.7,
-            'avg_camera_pivot': [0, 0, -0.06],
-        })
+            'avg_camera_pivot': [0, 0, 0],
+        }
     elif opts.cfg == 'shapenet':
-        rendering_options.update({
+        rendering_options = {
+            'depth_resolution': 64,
+            'depth_resolution_importance': 64,
+            'ray_start': 0.2,
+            'ray_end': 2.2,
+            'box_warp': 1.0,
+            'white_back': opts.use_white_back,
+            'avg_camera_radius': 1.2,
+            'avg_camera_pivot': [0, 0, 0],
+        }######################################################################
+    elif opts.cfg == 'tripleganger':
+        rendering_options = {
+            'depth_resolution': 48,
+            'depth_resolution_importance': 48,
+            'ray_start': 1.7,
+            'ray_end': 3.3,
+            'box_warp': 1,
+            'avg_camera_radius': 2.7,
+            'avg_camera_pivot': [0, 0, 0],
+        }
+    elif opts.cfg == 'mads':
+        rendering_options = {
             'depth_resolution': 64,
             'depth_resolution_importance': 64,
             'ray_start': 0.1,
             'ray_end': 2.6,
             'box_warp': 1.6,
-            'white_back': True,
             'avg_camera_radius': 1.7,
             'avg_camera_pivot': [0, 0, 0],
-        })
+        }
     else:
         assert False, "Need to specify config"
 
-
+    rendering_options.update({
+        'image_resolution': c.training_set_kwargs.resolution,
+        'disparity_space_sampling': False,
+        'clamp_mode': 'softplus',
+        'superresolution_module': sr_module,
+        'c_gen_conditioning_zero': not opts.gen_pose_cond, # if true, fill generator pose conditioning label with dummy zero vector
+        'c_scale': opts.c_scale, # mutliplier for generator pose conditioning label
+        'superresolution_noise_mode': opts.sr_noise_mode, # [random or none], whether to inject pixel noise into super-resolution layers
+        'density_reg': opts.density_reg, # strength of density regularization
+        'density_reg_p_dist': opts.density_reg_p_dist, # distance at which to sample perturbed points for density regularization
+        'reg_type': opts.reg_type, # for experimenting with variations on density regularization
+        'decoder_lr_mul': opts.decoder_lr_mul, # learning rate multiplier for decoder
+        'sr_antialias': True,
+    })
 
     if opts.density_reg > 0:
         c.G_reg_interval = opts.density_reg_every
+    c.G_kwargs.inference_show_geo_fid = opts.inference_show_geo_fid
     c.G_kwargs.rendering_kwargs = rendering_options
     c.G_kwargs.num_fp16_res = 0
     c.loss_kwargs.blur_init_sigma = 10 # Blur the images seen by the discriminator.
     c.loss_kwargs.blur_fade_kimg = c.batch_size * opts.blur_fade_kimg / 32 # Fade out the blur during the first N kimg.
 
-    c.loss_kwargs.gpc_reg_prob = opts.gpc_reg_prob if opts.gen_pose_cond else None
-    c.loss_kwargs.gpc_reg_fade_kimg = opts.gpc_reg_fade_kimg
+    c.loss_kwargs.swapping_prob_final = opts.swapping_prob_final if opts.gen_pose_cond else None
+    c.loss_kwargs.swapping_prob_fade_kimg = opts.swapping_prob_fade_kimg
     c.loss_kwargs.dual_discrimination = True
     c.loss_kwargs.neural_rendering_resolution_initial = opts.neural_rendering_resolution_initial
     c.loss_kwargs.neural_rendering_resolution_final = opts.neural_rendering_resolution_final
@@ -368,7 +409,7 @@ def main(**kwargs):
         c.ema_rampup = None # Disable EMA rampup.
         if not opts.resume_blur:
             c.loss_kwargs.blur_init_sigma = 0 # Disable blur rampup.
-            c.loss_kwargs.gpc_reg_fade_kimg = 0 # Disable swapping rampup
+            c.loss_kwargs.swapping_prob_fade_kimg = 0 # Disable swapping rampup
 
     # Performance-related toggles.
     # if opts.fp32:
@@ -396,3 +437,47 @@ if __name__ == "__main__":
     main() # pylint: disable=no-value-for-parameter
 
 #----------------------------------------------------------------------------
+'''
+# INstall packages
+cd /home/jungao/shared-def-tet/lab-code/human_face_3d
+export PYTHONPATH=$PWD:$PYTHONPATH
+export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+cd /home/jungao/shared-def-tet/lab-code/human_face_3d/stylegan3_updategit/stylegan3/eg3d-internal-eric-pytorch_antialiasing/eg3d
+pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 -f https://download.pytorch.org/whl/torch_stable.html
+'''
+#########
+##################
+# Train EG3D for human
+# python train.py --cfg=shapenet --data=/raid/ts_animal_render_1024/img/Mammal-442 --gpus=1 --batch=4 --gamma=3 --outdir=/raid/results/renderpeople_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=renderpeople --neural_rendering_resolution_final=128
+# Retrain EG3D for animal
+# python train.py --cfg=shapenet --data=/raid/ts_animal_render_1024/img/Mammal-442 --gpus=1 --batch=4 --gamma=3 --outdir=/raid/results/ts_animal_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=ts_animal --neural_rendering_resolution_final=128
+# Running inference for the pretrained model
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/02958343/ --gpus=1 --batch=4 --gamma=3 --outdir=/raid/results/shapenet_car_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_car --neural_rendering_resolution_final=128 --batch=1 --batch-gpu=1 --mbstd-group=1 --inference 1 --resume ../results/shapenet_car_camera_wz_try_with_new_fix_black_back/00002-shapenet--gpus8-batch32-gamma3/network-snapshot-003600.pkl
+# CMD 2022-05-08
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=8 --batch=32 --gamma=30 --outdir=/raid/results/shapenet_chair_camera_wz_try_with_new_fix_black_back_neural_render_128_try_2 --cond=1 --data_camera_mode=shapenet_chair --neural_rendering_resolution_final=128
+# Let's check the performance here
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_chair_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_chair --neural_rendering_resolution_final=128 --inference 1
+# CMD 2022-05-07
+# python train.py --cfg=shapenet --data=/raid/ts_animal_render_1024/img/Mammal-442 --gpus=8 --batch=32 --gamma=0.3 --outdir=/raid/results/ts_animal_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=ts_animal --neural_rendering_resolution_final=128
+# python train.py --cfg=shapenet --data=/raid/--gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/ts_animal_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=ts_animal --neural_rendering_resolution_final=128
+# python train.py --cfg=shapenet --data=/raid/shapenet_render_res_1024_tmp/img/03790512 --gpus=8 --batch=32 --gamma=0.3 --outdir=/raid/results/shapenet_motorbike_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_motorbike --neural_rendering_resolution_final=128
+# python train.py --cfg=shapenet --data=/raid/shapenet_render_res_1024_tmp/img/03790512 --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_motorbike_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_motorbike --neural_rendering_resolution_final=128
+# python train.py --cfg=shapenet --data=/ --gpus=8 --batch=32 --gamma=0.3 --outdir=/raid/results/shapenet_motorbike_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_motorbike --neural_rendering_resolution_final=128
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=8 --batch=32 --gamma=0.3 --outdir=/raid/results/shapenet_chair_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_chair --neural_rendering_resolution_final=128
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/02958343/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_car_camera_wz_try_with_new_fix_black_back_neural_render_128 --cond=1 --data_camera_mode=shapenet_car --neural_rendering_resolution_final=128
+# Cmd to train the model
+# CMD 2022-05-06
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=8 --batch=32 --gamma=0.3 --outdir=/raid/results/shapenet_chair_camera_wz_try_with_new_fix_black_back --cond=1 --data_camera_mode=shapenet_chair
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_chair_camera_wz_try_with_new_fix_white_back --cond=1 --data_camera_mode=shapenet_chair  --use_white_back 1
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/02958343/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_car_camera_wz_try_with_new_fix_black_back --cond=1 --data_camera_mode=shapenet_car
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/02958343/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_car_camera_wz_try_with_new_fix_white_back --cond=1 --data_camera_mode=shapenet_car  --use_white_back 1
+# Check with results using white background
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_chair_A100-pt1.11-eg3d-internal_camera_wz_white_back --cond=1 --data_camera_mode=shapenet_chair --use_white_back 1
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/02958343/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_car_A100-pt1.11-eg3d-internal_camera_wz_white_back --cond=1 --data_camera_mode=shapenet_car  --use_white_back 1
+
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_chair_A100-pt1.11-eg3d-internal_camera_wz_try_2 --cond=1 --data_camera_mode=shapenet_chair
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/02958343/ --gpus=1 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_car_A100-pt1.11-eg3d-internal --cond=1 --data_camera_mode=shapenet_car --camera_look_at_negative_z 1
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/029 --gpus=01 --batch=4 --gamma=0.3 --outdir=/raid/results/shapenet_car_A100-pt1.11-eg3d-internal --cond=1 --data_camera_mode=shapenet_car --gpus 1 --batch 4
+# python train.py --cfg=shapenet --data=/raid/raid/shapenet_render_res_1024/img/03001627/ --gpus=8 --batch=32 --gamma=0.3 --outdir=/raid/results/shapenet_chair_A100-pt1.11-eg3d-internal --cond=1 --data_camera_mode=shapenet_chair --camera_look_at_negative_z 1
+# pip install torch==1.11.0+cu113 torchvision==0.12.0+cu113 -f https://download.pytorch.org/whl/torch_stable.html

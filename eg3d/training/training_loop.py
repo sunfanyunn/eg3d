@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+﻿# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Main training loop."""
 
@@ -27,9 +25,7 @@ from torch_utils.ops import grid_sample_gradfix
 
 import legacy
 from metrics import metric_main
-from camera_utils import LookAtPoseSampler
-from training.crosssection_utils import sample_cross_section
-
+from GPUtil import showUtilization as gpu_usage
 #----------------------------------------------------------------------------
 
 def setup_snapshot_image_grid(training_set, random_seed=0):
@@ -53,6 +49,7 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
             label_groups[label].append(idx)
 
         # Reorder.
+        # label_order = sorted(label_groups.keys())
         label_order = list(label_groups.keys())
         rnd.shuffle(label_order)
         for label in label_order:
@@ -125,7 +122,20 @@ def training_loop(
     cudnn_benchmark         = True,     # Enable torch.backends.cudnn.benchmark?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
+        inference = False,
+inference_gen_geo = False,
+inference_show_geo_fid = False,
 ):
+    from torch_utils.ops import upfirdn2d
+    from torch_utils.ops import bias_act
+    from torch_utils.ops import filtered_lrelu
+    upfirdn2d._init()
+    bias_act._init()
+    filtered_lrelu._init()
+    if num_gpus > 1:
+        torch.distributed.barrier()
+
+
     # Initialize.
     start_time = time.time()
     device = torch.device('cuda', rank)
@@ -134,7 +144,7 @@ def training_loop(
     torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
     torch.backends.cuda.matmul.allow_tf32 = False       # Improves numerical accuracy.
     torch.backends.cudnn.allow_tf32 = False             # Improves numerical accuracy.
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False  # Improves numerical accuracy.
+    # torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False  # Improves numerical accuracy.
     conv2d_gradfix.enabled = True                       # Improves training speed. # TODO: ENABLE
     grid_sample_gradfix.enabled = False                  # Avoids errors with the augmentation pipe.
 
@@ -156,10 +166,17 @@ def training_loop(
         print('Constructing networks...')
     common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-    G.register_buffer('dataset_label_std', torch.tensor(training_set.get_label_std()).to(device))
+    # G.register_buffer('dataset_label_std', torch.tensor(training_set.get_label_std()).to(device))
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
 
+    debug_gpu = False####
+    if debug_gpu:
+        torch.distributed.barrier()
+        # print()
+        if rank == 0:
+            print('finished create model')
+            gpu_usage()
     # Resume from existing pickle.
     if (resume_pkl is not None) and (rank == 0):
         print(f'Resuming from "{resume_pkl}"')
@@ -169,11 +186,14 @@ def training_loop(
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
     # Print network summary tables.
-    if rank == 0:
-        z = torch.empty([batch_gpu, G.z_dim], device=device)
-        c = torch.empty([batch_gpu, G.c_dim], device=device)
-        img = misc.print_module_summary(G, [z, c])
-        misc.print_module_summary(D, [img, c])
+    ############################
+    # import ipdb
+    # ipdb.set_trace()
+    # if rank == 0:
+    #     z = torch.empty([batch_gpu, G.z_dim], device=device)
+    #     c = torch.empty([batch_gpu, G.c_dim], device=device)
+    #     img = misc.print_module_summary(G, [z, c])
+    #     misc.print_module_summary(D, [img, c])
 
     # Setup augmentation.
     if rank == 0:
@@ -185,16 +205,33 @@ def training_loop(
         augment_pipe.p.copy_(torch.as_tensor(augment_p))
         if ada_target is not None:
             ada_stats = training_stats.Collector(regex='Loss/signs/real')
-
+    if debug_gpu:
+        torch.distributed.barrier()
+        # print()
+        if rank == 0:
+            print('finished augmentation model')
+            gpu_usage()
     # Distribute across GPUs.
     if rank == 0:
         print(f'Distributing across {num_gpus} GPUs...')
-    for module in [G, D, G_ema, augment_pipe]:
-        if module is not None:
-            for param in misc.params_and_buffers(module):
-                if param.numel() > 0 and num_gpus > 1:
-                    torch.distributed.broadcast(param, src=0)
 
+    for module in [G, D, G_ema, augment_pipe]:
+        if module is not None and num_gpus > 1:
+            for param in misc.params_and_buffers(module):
+                torch.distributed.broadcast(param, src=0)
+    #####################################################################
+    # for module in [G, D, G_ema, augment_pipe]:
+    #     if module is not None:
+    #         for param in misc.params_and_buffers(module):
+    #             if param.numel() > 0 and num_gpus > 1:
+    #                 torch.distributed.broadcast(param, src=0)
+
+    if debug_gpu:
+        torch.distributed.barrier()
+        # print()
+        if rank == 0:
+            print('finished distributed model')
+            gpu_usage()
     # Setup training phases.
     if rank == 0:
         print('Setting up training phases...')
@@ -219,16 +256,91 @@ def training_loop(
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
 
+
+    ## Inference
+    # if inference:
+    #     with torch.no_grad():
+    #         from training.inference_utils import inference_and_save_geo
+    #         inference_and_save_geo(G_ema)
     # Export sample images.
     grid_size = None
     grid_z = None
     grid_c = None
+    if debug_gpu:
+        torch.distributed.barrier()
+        # print()
+        if rank == 0:
+            print('finished create optimizer')
+            gpu_usage()
     if rank == 0:
         print('Exporting sample images...')
-        grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
-        grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+        with torch.no_grad():
+            grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
+            save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+            grid_z = torch.randn([labels.shape[0], G.z_dim], device=device)
+            grid_c = torch.from_numpy(labels).to(device).float()
+            # out = [G_ema(z=z, c=c, noise_mode='const') for z, c in zip(grid_z, grid_c)]
+            # images = torch.cat([o['image'].cpu() for o in out]).numpy()
+            # images_raw = torch.cat([o['image_raw'].cpu() for o in out]).numpy()
+            # images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
+            # save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+            # save_image_grid(images_raw, os.path.join(run_dir, 'fakes_raw_init.png'), drange=[-1,1], grid_size=grid_size)
+            # save_image_grid(images_depth, os.path.join(run_dir, 'fakes_depth_init.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
+            # import ipdb
+            # ipdb.set_trace()
+            from training.dataset import create_condition_from_camera_angle
+            from camera_utils import LookAtPoseSampler
+            # import ipdb
+            # ipdb.set_trace()
+
+            # This is fine, forward label will become zero afterwards
+            # We have 8 * 15 images shapes to generate
+            n_shape = 8
+            n_view = 15
+            update_grid_z = []
+            update_grid_c = []
+            for i_shape in range(n_shape):
+                update_grid_z.append(torch.randn([1, G.z_dim], device=device).expand(n_view,-1))
+                for i_view in range(n_view):
+                    cond = create_condition_from_camera_angle(rotation = (i_view / float(n_view)) * 2.0 * np.pi,
+                                                              elevation = 75.0 / 180.0 * np.pi, radius = 1.2)
+                    update_grid_c.append(torch.from_numpy(cond).unsqueeze(dim=0))
+            # import ipdb
+            # ipdb.set_trace()
+            if not inference:
+                grid_z = torch.cat(update_grid_z, dim=0).split(batch_gpu)
+                grid_c = torch.cat(update_grid_c, dim=0).to(device).split(batch_gpu)
+            else:
+                grid_z = grid_z.split(batch_gpu)
+                grid_c = grid_c.split(batch_gpu)
+                G_ema.neural_rendering_resolution = 128 # Manually set it to be 128 here  to avoid the problems we had before
+
+            forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2, 3.14/2, torch.tensor([0, 0, 0.2], device=device), radius=2.7, device=device)
+            intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
+            forward_label = torch.cat([forward_cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
+
+            grid_ws = [G_ema.mapping(z, forward_label.expand(z.shape[0], -1)) for z, c in zip(grid_z, grid_c)]
+
+            #######
+            if G_ema.inference_show_geo_fid:
+                out = [G_ema(z=z, c=c, noise_mode='const') for z, c in zip(grid_z, grid_c)]
+            else:
+                out = [G_ema.synthesis(ws, c=c, noise_mode='const') for ws, c in zip(grid_ws, grid_c)]
+
+            images = torch.cat([o['image'].cpu() for o in out]).numpy()
+            images_raw = torch.cat([o['image_raw'].cpu() for o in out]).numpy()
+            images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
+            save_image_grid(images, os.path.join(run_dir, 'fakes_init_f.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images_raw, os.path.join(run_dir, 'fakes_raw_init_f.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images_depth, os.path.join(run_dir, 'fakes_depth_init_f.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
+
+            # # Cross sections
+            from training.crosssection_utils import sample_crossection
+            if inference:exit()
+            # grid_ws = [G_ema.mapping(z, c.expand(z.shape[0], -1)) for z, c in zip(grid_z, grid_c)]
+            # out = [sample_crossection(G_ema, ws) for ws, c in zip(grid_ws, grid_c)]
+            # crossections = torch.cat([o.cpu() for o in out]).numpy()
+            # save_image_grid(crossections, os.path.join(run_dir, 'fakes_init_crossection.png'), drange=[-50,100], grid_size=grid_size)
 
     # Initialize logs.
     if rank == 0:
@@ -257,17 +369,47 @@ def training_loop(
     batch_idx = 0
     if progress_fn is not None:
         progress_fn(0, total_kimg)
+    # torch.cuda.empty_cache()
+
+    if inference:
+        with torch.no_grad():
+            calculate_metric = not inference_gen_geo #########################
+            if calculate_metric:
+                training_set_kwargs['split'] = 'test'
+                for metric in metrics:
+                    result_dict = metric_main.calc_metric(metric=metric, G=G_ema,
+                                                          dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank,
+                                                          device=device)
+                    if rank == 0:
+                        metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl='tmp.pkl')
+                    stats_metrics.update(result_dict.results)
+                torch.cuda.empty_cache()
+                exit()
+            else:
+                from training.inference_utils import inference_and_save_geo
+                inference_and_save_geo(G_ema, run_dir, grid_z)
+        exit()
+        ##########################
+    if rank == 0:
+        torch.cuda.empty_cache()
+    if debug_gpu:
+        torch.distributed.barrier()
+        # print()
+        if rank == 0:
+            print('finished init model')
+            gpu_usage()
+
     while True:
 
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
             phase_real_img, phase_real_c = next(training_set_iterator)
             phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
-            phase_real_c = phase_real_c.to(device).split(batch_gpu)
+            phase_real_c = phase_real_c.to(device).float().split(batch_gpu)
             all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
             all_gen_z = [phase_gen_z.split(batch_gpu) for phase_gen_z in all_gen_z.split(batch_size)]
             all_gen_c = [training_set.get_label(np.random.randint(len(training_set))) for _ in range(len(phases) * batch_size)]
-            all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().to(device)
+            all_gen_c = torch.from_numpy(np.stack(all_gen_c)).pin_memory().float().to(device)
             all_gen_c = [phase_gen_c.split(batch_gpu) for phase_gen_c in all_gen_c.split(batch_size)]
 
         # Execute training phases.
@@ -313,7 +455,6 @@ def training_loop(
             for b_ema, b in zip(G_ema.buffers(), G.buffers()):
                 b_ema.copy_(b)
             G_ema.neural_rendering_resolution = G.neural_rendering_resolution
-            G_ema.rendering_kwargs = G.rendering_kwargs.copy()
 
         # Update state.
         cur_nimg += batch_size
@@ -366,30 +507,26 @@ def training_loop(
             save_image_grid(images_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_raw.png'), drange=[-1,1], grid_size=grid_size)
             save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
 
-            #--------------------
-            # # Log forward-conditioned images
+            # from camera_utils import LookAtPoseSampler
+            forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2, 3.14/2, torch.tensor([0, 0, 0.2], device=device), radius=2.7, device=device)
+            intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
+            forward_label = torch.cat([forward_cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
 
-            # forward_cam2world_pose = LookAtPoseSampler.sample(3.14/2, 3.14/2, torch.tensor([0, 0, 0.2], device=device), radius=2.7, device=device)
-            # intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
-            # forward_label = torch.cat([forward_cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
+            grid_ws = [G_ema.mapping(z, forward_label.expand(z.shape[0], -1)) for z, c in zip(grid_z, grid_c)]
+            out = [G_ema.synthesis(ws, c=c, noise_mode='const') for ws, c in zip(grid_ws, grid_c)]
 
-            # grid_ws = [G_ema.mapping(z, forward_label.expand(z.shape[0], -1)) for z, c in zip(grid_z, grid_c)]
-            # out = [G_ema.synthesis(ws, c=c, noise_mode='const') for ws, c in zip(grid_ws, grid_c)]
+            images = torch.cat([o['image'].cpu() for o in out]).numpy()
+            images_raw = torch.cat([o['image_raw'].cpu() for o in out]).numpy()
+            images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
+            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_f.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_raw_f.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth_f.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
 
-            # images = torch.cat([o['image'].cpu() for o in out]).numpy()
-            # images_raw = torch.cat([o['image_raw'].cpu() for o in out]).numpy()
-            # images_depth = -torch.cat([o['image_depth'].cpu() for o in out]).numpy()
-            # save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_f.png'), drange=[-1,1], grid_size=grid_size)
-            # save_image_grid(images_raw, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_raw_f.png'), drange=[-1,1], grid_size=grid_size)
-            # save_image_grid(images_depth, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_depth_f.png'), drange=[images_depth.min(), images_depth.max()], grid_size=grid_size)
-
-            #--------------------
-            # # Log Cross sections
-
-            # grid_ws = [G_ema.mapping(z, c.expand(z.shape[0], -1)) for z, c in zip(grid_z, grid_c)]
-            # out = [sample_cross_section(G_ema, ws, w=G.rendering_kwargs['box_warp']) for ws, c in zip(grid_ws, grid_c)]
-            # crossections = torch.cat([o.cpu() for o in out]).numpy()
-            # save_image_grid(crossections, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_crossection.png'), drange=[-50,100], grid_size=grid_size)
+            # Cross sections
+            grid_ws = [G_ema.mapping(z, c.expand(z.shape[0], -1)) for z, c in zip(grid_z, grid_c)]
+            out = [sample_crossection(G_ema, ws) for ws, c in zip(grid_ws, grid_c)]
+            crossections = torch.cat([o.cpu() for o in out]).numpy()
+            save_image_grid(crossections, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}_crossection.png'), drange=[-50,100], grid_size=grid_size)
 
         # Save network snapshot.
         snapshot_pkl = None
@@ -413,12 +550,14 @@ def training_loop(
             if rank == 0:
                 print(run_dir)
                 print('Evaluating metrics...')
+            training_set_kwargs['split'] = 'val'
             for metric in metrics:
                 result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
                     dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)
                 stats_metrics.update(result_dict.results)
+            torch.cuda.empty_cache()
         del snapshot_data # conserve memory
 
         # Collect statistics.

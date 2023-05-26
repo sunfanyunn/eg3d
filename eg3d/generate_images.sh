@@ -1,0 +1,2 @@
+#!/bin/bash -ex
+python train.py --cfg=shapenet --data=/raid/sun/eg3d_sun/dataset_preprocessing/shapenet_chairs/backup/chairs_train --gpus=1 --batch=4 --gamma=30 --outdir=./show_results/show_pretrained_chair --cond=1 --data_camera_mode=shapenet_chair --neural_rendering_resolution_final=128 --batch=1 --batch-gpu=1 --mbstd-group=1 --inference 1  --resume /raid/sun/pretrained_models/Jun_shapenet_chairs.pkl --inference_show_geo_fid 0 --mbstd-group 1

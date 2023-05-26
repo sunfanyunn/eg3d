@@ -1,12 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
 #
-# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
-# property and proprietary rights in and to this material, related
-# documentation and any modifications thereto. Any use, reproduction,
-# disclosure or distribution of this material and related documentation
-# without an express license agreement from NVIDIA CORPORATION or
-# its affiliates is strictly prohibited.
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 """Discriminator architectures from the paper
 "Efficient Geometry-aware 3D Generative Adversarial Networks"."""
@@ -83,22 +81,14 @@ class SingleDiscriminator(torch.nn.Module):
 
 #----------------------------------------------------------------------------
 
-def filtered_resizing(image_orig_tensor, size, f, filter_mode='antialiased'):
-    if filter_mode == 'antialiased':
-        ada_filtered_64 = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size), mode='bilinear', align_corners=False, antialias=True)
-    elif filter_mode == 'classic':
-        ada_filtered_64 = upfirdn2d.upsample2d(image_orig_tensor, f, up=2)
-        ada_filtered_64 = torch.nn.functional.interpolate(ada_filtered_64, size=(size * 2 + 2, size * 2 + 2), mode='bilinear', align_corners=False)
-        ada_filtered_64 = upfirdn2d.downsample2d(ada_filtered_64, f, down=2, flip_filter=True, padding=-1)
-    elif filter_mode == 'none':
-        ada_filtered_64 = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size), mode='bilinear', align_corners=False)
-    elif type(filter_mode) == float:
-        assert 0 < filter_mode < 1
+# def filtered_resizing(image_orig_tensor, size, f):
+#     ada_filtered_64 = upfirdn2d.upsample2d(image_orig_tensor, f, up=2)
+#     ada_filtered_64 = torch.nn.functional.interpolate(ada_filtered_64, size=(size * 2 + 2, size * 2 + 2), mode='bilinear', align_corners=False)
+#     ada_filtered_64 = upfirdn2d.downsample2d(ada_filtered_64, f, down=2, flip_filter=True, padding=-1)
+#     return ada_filtered_64
 
-        filtered = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size), mode='bilinear', align_corners=False, antialias=True)
-        aliased  = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size), mode='bilinear', align_corners=False, antialias=False)
-        ada_filtered_64 = (1 - filter_mode) * aliased + (filter_mode) * filtered
-        
+def filtered_resizing(image_orig_tensor, size, f):
+    ada_filtered_64 = torch.nn.functional.interpolate(image_orig_tensor, size=(size, size), mode='bilinear', align_corners=False, antialias=True)
     return ada_filtered_64
 
 #----------------------------------------------------------------------------
@@ -115,7 +105,6 @@ class DualDiscriminator(torch.nn.Module):
         num_fp16_res        = 4,        # Use FP16 for the N highest resolutions.
         conv_clamp          = 256,      # Clamp the output of convolution layers to +-X, None = disable clamping.
         cmap_dim            = None,     # Dimensionality of mapped conditioning label, None = default.
-        disc_c_noise        = 0,        # Corrupt camera parameters with X std dev of noise before disc. pose conditioning.
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
@@ -151,9 +140,10 @@ class DualDiscriminator(torch.nn.Module):
             self.mapping = MappingNetwork(z_dim=0, c_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter([1,3,3,1]))
-        self.disc_c_noise = disc_c_noise
 
     def forward(self, img, c, update_emas=False, **block_kwargs):
+        # assert img['image_raw'].shape[-2:] == (64, 64)
+        # image_raw = torch.nn.functional.interpolate(img['image_raw'], size=img['image'].shape[-2:], mode='bilinear', align_corners=False)
         image_raw = filtered_resizing(img['image_raw'], size=img['image'].shape[-1], f=self.resample_filter)
         img = torch.cat([img['image'], image_raw], 1)
 
@@ -165,7 +155,6 @@ class DualDiscriminator(torch.nn.Module):
 
         cmap = None
         if self.c_dim > 0:
-            if self.disc_c_noise > 0: c += torch.randn_like(c) * c.std(0) * self.disc_c_noise
             cmap = self.mapping(None, c)
         x = self.b4(x, img, cmap)
         return x
